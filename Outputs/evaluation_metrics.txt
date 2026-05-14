@@ -1,0 +1,29 @@
+============================================================
+    KẾT QUẢ ĐÁNH GIÁ MÔ HÌNH LinearSVC + Calibration
+============================================================
+
+--- CHỈ SỐ TỔNG QUAN ---
+  Accuracy              : 0.9100  (91.00%)
+  Precision (Weighted)  : 0.9097
+  Recall    (Weighted)  : 0.9100
+  F1-Score  (Weighted)  : 0.9097
+  Precision (Macro)     : 0.9068
+  Recall    (Macro)     : 0.9009
+  F1-Score  (Macro)     : 0.9037
+  ROC-AUC               : 0.9679
+
+--- MA TRẬN NHẦM LẪN (Confusion Matrix) ---
+[[ 7673  1214]
+ [  899 13692]]
+
+--- BÁO CÁO PHÂN LỚP CHI TIẾT ---
+              precision    recall  f1-score   support
+
+Negative (0)       0.90      0.86      0.88      8887
+Positive (1)       0.92      0.94      0.93     14591
+
+    accuracy                           0.91     23478
+   macro avg       0.91      0.90      0.90     23478
+weighted avg       0.91      0.91      0.91     23478
+
+============================================================
