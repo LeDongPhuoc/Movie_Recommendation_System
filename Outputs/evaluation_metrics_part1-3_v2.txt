@@ -1,0 +1,33 @@
+Thay đổi một số chỉ số ban đầu:
+Mẫu: 150000-> 500000
+TruncatedSVD: 100 -> 150
+TF-IDF: 50000
+============================================================
+    KẾT QUẢ ĐÁNH GIÁ MÔ HÌNH LinearSVC + Calibration
+============================================================
+
+--- CHỈ SỐ TỔNG QUAN ---
+  Accuracy              : 0.9226  (92.26%)
+  Precision (Weighted)  : 0.9224
+  Recall    (Weighted)  : 0.9226
+  F1-Score  (Weighted)  : 0.9224
+  Precision (Macro)     : 0.9197
+  Recall    (Macro)     : 0.9158
+  F1-Score  (Macro)     : 0.9177
+  ROC-AUC               : 0.9744
+
+--- MA TRẬN NHẦM LẪN (Confusion Matrix) ---
+[[27146  3459]
+ [ 2734 46630]]
+
+--- BÁO CÁO PHÂN LỚP CHI TIẾT ---
+              precision    recall  f1-score   support
+
+Negative (0)       0.91      0.89      0.90     30605
+Positive (1)       0.93      0.94      0.94     49364
+
+    accuracy                           0.92     79969
+   macro avg       0.92      0.92      0.92     79969
+weighted avg       0.92      0.92      0.92     79969
+
+============================================================

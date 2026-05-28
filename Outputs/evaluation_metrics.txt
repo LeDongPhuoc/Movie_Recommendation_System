@@ -3,27 +3,48 @@
 ============================================================
 
 --- CHỈ SỐ TỔNG QUAN ---
-  Accuracy              : 0.9100  (91.00%)
-  Precision (Weighted)  : 0.9097
-  Recall    (Weighted)  : 0.9100
-  F1-Score  (Weighted)  : 0.9097
-  Precision (Macro)     : 0.9068
-  Recall    (Macro)     : 0.9009
-  F1-Score  (Macro)     : 0.9037
-  ROC-AUC               : 0.9679
+  Accuracy              : 0.9219  (92.19%)
+  Precision (Weighted)  : 0.9217
+  Recall    (Weighted)  : 0.9219
+  F1-Score  (Weighted)  : 0.9217
+  Precision (Macro)     : 0.9188
+  Recall    (Macro)     : 0.9153
+  F1-Score  (Macro)     : 0.9170
+  ROC-AUC               : 0.9748
 
 --- MA TRẬN NHẦM LẪN (Confusion Matrix) ---
-[[ 7673  1214]
- [  899 13692]]
+[[26811  3407]
+ [ 2767 46062]]
 
 --- BÁO CÁO PHÂN LỚP CHI TIẾT ---
               precision    recall  f1-score   support
 
-Negative (0)       0.90      0.86      0.88      8887
-Positive (1)       0.92      0.94      0.93     14591
+Negative (0)       0.91      0.89      0.90     30218
+Positive (1)       0.93      0.94      0.94     48829
 
-    accuracy                           0.91     23478
-   macro avg       0.91      0.90      0.90     23478
-weighted avg       0.91      0.91      0.91     23478
+    accuracy                           0.92     79047
+   macro avg       0.92      0.92      0.92     79047
+weighted avg       0.92      0.92      0.92     79047
 
 ============================================================
+============================================================
+    ĐÁNH GIÁ HỆ THỐNG GỢI Ý (Offline Evaluation)
+============================================================
+  Số user đánh giá : 200
+  K values         : [5, 10]
+
+--- PRECISION@K & NDCG@K ---
+  Precision@5       : 0.3137
+  NDCG@5            : 0.5437
+  Precision@10      : 0.1858
+  NDCG@10           : 0.5439
+
+--- ĐA DẠNG HOÁ GỢI Ý ---
+  Intra-List Div. : 0.6119  (0=đơn điệu, 1=đa dạng)
+============================================================
+
+--- SVD Collaborative Filtering ---
+  n_components      : 150
+  Explained Variance: 0.2037 (20.4%)
+  User count        : 276,881
+  Movie count       : 63,882

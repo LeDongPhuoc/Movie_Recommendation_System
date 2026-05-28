@@ -1,7 +1,7 @@
 # 📄 Tài Liệu Cập Nhật – Hệ Thống Gợi Ý Phim Hybrid
 
 > **Dự án:** KPDL_DoAn · SVM + TF-IDF + Cosine Similarity + SVD  
-> **Cập nhật:** 14/05/2026 (v2 – Cân bằng dữ liệu 1.5:1)
+> **Cập nhật:** 14/05/2026 (v2) | 20/05/2026 (v3) | 20/05/2026 (v4) | 21/05/2026 (v5 – UI) | 21/05/2026 (v6 – Algorithm Improvements)
 
 ---
 
@@ -311,3 +311,457 @@ streamlit run main_web.py
 ---
 
 *KPDL_DoAn 2026 – Cập nhật tự động*
+
+---
+
+## 9. Nhật Ký Sửa Đổi v3 (20/05/2026) – Sửa Lỗi Đọc File JSON
+
+### Mô tả lỗi
+
+Khi chạy `train_SVM_cosine_SVD.py`, pipeline báo:
+
+```
+Gộp thành công! Tổng số lượng review thô ban đầu: 3 dòng.
+Lỗi hệ thống: ['rating', 'review_detail']
+KeyError: ['rating', 'review_detail']
+```
+
+Thay vì hàng triệu dòng (3 file ~1GB/file), chỉ đọc được 3 dòng (1 dòng/file).
+
+### Nguyên Nhân Gốc Rễ
+
+| Vấn đề | Chi tiết |
+|---|---|
+| **Định dạng file** | Các file `part-*.json` lưu dạng **Standard JSON Array** (`[{...}, {...}, ...]`), không phải JSON Lines |
+| **`pd.read_json(lines=True)` thất bại** | Đúng — file không phải JSON Lines, nên `ValueError` được ném ra |
+| **Fallback `pd.read_json(file)` bị sai** | `pd.read_json` mặc định dùng `orient='columns'` thay vì `orient='records'` → đọc transpose, mỗi file chỉ trả về 1 dòng |
+| **Hậu quả** | `len(df) = 3` (3 file → 3 dòng), không có cột `rating` / `review_detail` → `KeyError` |
+
+### Giải Pháp (v3)
+
+**File sửa đổi:** `train_SVM_cosine_SVD.py`
+
+#### Thay đổi 1 – Thêm `import json`
+```python
+# Dòng 8
+import json
+```
+
+#### Thay đổi 2 – Thêm hàm helper `_load_json_file()` (trước `run_training_pipeline`)
+```python
+def _load_json_file(filepath):
+    """
+    Đọc file JSON lớn an toàn. Hỗ trợ 2 định dạng:
+      1. JSON Lines: {"k": v}\n{"k": v}\n...
+      2. Standard JSON Array: [{...}, {...}, ...]
+    """
+    # Bước 1: Thử JSON Lines
+    try:
+        df = pd.read_json(filepath, lines=True, encoding='utf-8')
+        if df.shape[0] > 1:
+            return df
+    except Exception:
+        pass
+
+    # Bước 2: Standard JSON Array dùng json.load → pd.DataFrame
+    # (tránh bug orientation của pd.read_json mặc định)
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return pd.DataFrame(data)
+        elif isinstance(data, dict):
+            return pd.DataFrame.from_dict(data, orient='index')
+    except Exception as e:
+        raise ValueError(f"Không thể đọc file '{filepath}': {e}")
+```
+
+#### Thay đổi 3 – Thay vòng lặp đọc file trong `run_training_pipeline`
+```python
+# TRƯỚC (sai – fallback pd.read_json không có orient='records')
+try:
+    temp_df = pd.read_json(file, lines=True)
+except ValueError:
+    temp_df = pd.read_json(file)   # ← BUG: đọc sai orientation
+
+# SAU (đúng – dùng _load_json_file)
+temp_df = _load_json_file(file)
+print(f"     -> Đọc được {len(temp_df):,} dòng, cột: {list(temp_df.columns)}")
+```
+
+### Tại Sao Không Dùng `orient='records'` Trực Tiếp?
+
+`pd.read_json(file, orient='records')` với file 1GB sẽ vẫn load toàn bộ file vào RAM cùng lúc. Cách dùng `json.load()` và tạo DataFrame cũng làm vậy nhưng **chính xác hơn** vì tránh hoàn toàn logic orientation phức tạp của pandas. Với RAM đủ lớn (≥ 16GB) thì không có vấn đề; nếu cần tối ưu RAM có thể nâng cấp lên dùng `ijson` streaming.
+
+### Phạm Vi Ảnh Hưởng
+
+| Phần | Ảnh hưởng |
+|---|---|
+| `_load_json_file()` | Hàm mới, không ảnh hưởng code cũ |
+| `run_training_pipeline()` | Chỉ thay đổi 5 dòng trong vòng lặp đọc file |
+| Toàn bộ pipeline sau đó | **Không thay đổi** |
+| `main_web.py` | **Không thay đổi** |
+| `PhanTichCamXuc_IMDB.py` | **Không thay đổi** |
+
+---
+
+## 10. Nhật Ký Clean Code v4 (20/05/2026)
+
+### Mục tiêu
+Rà soát và làm sạch cả hai file theo nguyên tắc clean code:
+- **DRY** (Don't Repeat Yourself) – không lặp logic
+- **Single Responsibility** – mỗi hàm một nhiệm vụ rõ ràng
+- **Naming** – tên biến/hàm rõ nghĩa, nhất quán
+- **Consistency** – cùng 1 quy tắc dùng suốt toàn bộ codebase
+
+---
+
+### File: `train_SVM_cosine_SVD.py`
+
+#### Vấn đề 1 – Mâu thuẫn `sample_size` (BUG LOGIC)
+```python
+# TRƯỚC – default ≠ lời gọi → gây nhầm lẫn: "script đang dùng giá trị nào?"
+def run_training_pipeline(..., sample_size=500000, ...):
+    ...
+run_training_pipeline(..., sample_size=150000, ...)  # ← override ngầm
+
+# SAU – 1 hằng số duy nhất tại đầu file, dùng làm default
+SAMPLE_SIZE = 150_000                               # ← nguồn sự thật duy nhất
+def run_training_pipeline(..., sample_size=SAMPLE_SIZE, ...):
+    ...
+run_training_pipeline(folder_path=FOLDER_PATH, meta_file_path=META_FILE_PATH)
+# Không cần truyền lại tham số đã có default đúng
+```
+**Tất cả tham số cấu hình (`SAMPLE_SIZE`, `RATING_POS_THRESHOLD`, `FILTER_YEAR`...) đều tập trung tại phần "CẤU HÌNH CHUNG" đầu file.**
+
+#### Vấn đề 2 – Import thừa
+```python
+# TRƯỚC
+from sklearn.metrics import (..., average_precision_score)  # không dùng ở đâu
+
+# SAU – bỏ import này
+```
+
+#### Vấn đề 3 – `dual=True` deprecated
+```python
+# TRƯỚC
+LinearSVC(dual=True, ...)   # FutureWarning trong sklearn mới
+
+# SAU
+LinearSVC(dual="auto", ...)  # tự chọn tối ưu theo n_samples vs n_features
+```
+
+#### Vấn đề 4 – Hàm nội tuyến ẩn `_normalize_title`
+```python
+# TRƯỚC – hàm super_clean_title định nghĩa lồng trong filter_movies_by_year
+def filter_movies_by_year(...):
+    def super_clean_title(title): ...
+
+# SAU – đổi tên rõ nghĩa, vẫn nội tuyến (scope hợp lý)
+def _normalize_title(title: str) -> str: ...
+```
+
+#### Vấn đề 5 – Raise đúng exception type
+```python
+# TRƯỚC
+raise ValueError("Không tim thấy file...")
+
+# SAU – dùng FileNotFoundError đúng ngữ nghĩa
+raise FileNotFoundError("Không tìm thấy file...")
+```
+
+#### Vấn đề 6 – Logic gán nhãn dạng lambda khó đọc
+```python
+# TRƯỚC
+df['label'] = df['rating'].apply(
+    lambda x: 1 if x >= pos else (0 if x <= neg else -1)
+)
+
+# SAU – hàm nội tuyến có tên
+def _assign_label(r):
+    if r >= rating_pos_threshold: return 1
+    if r <= rating_neg_threshold: return 0
+    return -1
+df_balanced['label'] = df_balanced['rating'].apply(_assign_label)
+```
+
+#### Vấn đề 7 – Comment sai chính tả
+```python
+# TRƯỚC
+print(f"\n[!]       file IMDb metadata từ {meta_file_path}...")  # thiếu "Đang tải"
+
+# SAU
+print(f"\n[!] Đang tải file IMDb metadata từ: {meta_file_path}")
+```
+
+---
+
+### File: `main_web.py`
+
+#### Vấn đề 1 – `import scipy.sparse` trong thân hàm
+```python
+# TRƯỚC – import nằm TRONG hàm recommend_by_movies
+def recommend_by_movies(...):
+    import scipy.sparse as sp   # ← vi phạm PEP8, khó phát hiện dependency
+    ...
+
+# SAU – xóa luôn (sp không được dùng sau khi refactor, đã dùng numpy thay thế)
+```
+
+#### Vấn đề 2 – Logic SVD lặp lại ở 2 hàm
+```python
+# TRƯỚC – copy-paste y hệt trong recommend_by_query VÀ recommend_by_movies
+is_pers = user_key != "🎭 Khách" and user_key in svd_data['user_map']
+if is_pers:
+    u_vec = svd_data['user_factors'][svd_data['user_map'][user_key]]
+    for i, m in enumerate(cands['movie']):
+        if m in svd_data['movie_map']:
+            svd_scores[i] = np.dot(u_vec, svd_data['item_factors'][...])
+
+# SAU – tách thành 3 helper functions
+def _is_personalized(user_key): ...
+def _compute_svd_scores(candidate_movies, user_key): ...
+def _blend_scores(cos_norm, svd_norm, is_pers): ...
+```
+
+#### Vấn đề 3 – Tên hàm quá ngắn, không rõ nghĩa
+```python
+# TRƯỚC
+def yt_url(t): ...      # không rõ là gì
+def imdb_url(t): ...    # mơ hồ
+def stars(r): ...       # quá ngắn
+
+# SAU
+def build_youtube_url(title: str): ...
+def build_imdb_url(title: str): ...
+def rating_to_stars(rating): ...
+```
+
+#### Vấn đề 4 – Accuracy hardcode trong UI
+```python
+# TRƯỚC
+"92.15%"  # hardcode – mỗi lần retrain phải sửa tay
+
+# SAU – đọc động từ evaluation_metrics.txt
+if os.path.exists(_metrics_path):
+    # parse dòng có "Accuracy" và "%"
+    _svm_accuracy = ...
+```
+
+#### Vấn đề 5 – Code render lặp ở 2 tab
+```python
+# TRƯỚC – vòng lặp render card + tabs lặp lại ở tab Search VÀ tab Experience
+for rank, (_, row) in enumerate(results.iterrows(), 1):
+    render_movie_card(...)
+    r_tab, l_tab = st.tabs([...])
+    with r_tab: render_reviews_tab(row['movie'])
+    with l_tab: render_links_tab(row['movie'])
+    st.markdown("---")
+
+# SAU – gộp vào 1 hàm duy nhất
+def render_result_list(results: pd.DataFrame): ...
+```
+
+#### Vấn đề 6 – Spacer HTML thô
+```python
+# TRƯỚC
+st.markdown("<br>", unsafe_allow_html=True)   # không có nghĩa, magic number
+
+# SAU
+st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)  # rõ ràng hơn
+```
+
+#### Vấn đề 7 – Kiểm tra file trước khi tải model
+```python
+# TRƯỚC – try/except chung chung, thông báo lỗi không rõ file nào thiếu
+try:
+    return (joblib.load(...), ...)
+except Exception as e:
+    st.error(f"Không tải được mô hình: {e}")
+
+# SAU – kiểm tra từng file trước, báo rõ file nào thiếu
+missing = [f for f in required_files if not os.path.exists(...)]
+if missing:
+    st.error(f"Thiếu file: {missing}")
+    st.stop()
+```
+
+---
+
+### Tổng Kết Thay Đổi
+
+| Hạng mục | `train_SVM_cosine_SVD.py` | `main_web.py` |
+|---|---|---|
+| Hàm/biến thêm mới | `SAMPLE_SIZE`, `RATING_*`, `_assign_label` | `_is_personalized`, `_compute_svd_scores`, `_blend_scores`, `render_result_list` |
+| Hàm/biến đổi tên | `super_clean_title` → `_normalize_title` | `yt_url` → `build_youtube_url`, `stars` → `rating_to_stars`, v.v. |
+| Hàm/biến xóa | `average_precision_score` (import thừa) | `import scipy.sparse` (trong hàm), logic SVD lặp |
+| Chức năng thay đổi | **Không** | **Không** |
+| Kết quả train | **Không thay đổi** | N/A |
+
+---
+
+## 11. Nhật Ký UI Improvements v5 (21/05/2026)
+
+> **Phạm vi:** Chỉ `main_web.py` — không ảnh hưởng mô hình hay pipeline training
+
+### Mục tiêu
+
+Cải thiện trải nghiệm người dùng theo 4 nhóm: tương phản màu sắc, từ khoá kết quả, hiển thị review,
+và cấu trúc layout poster (sẵn sàng chờ API key).
+
+---
+
+### Thay đổi 1 – Sửa Màu Chữ (WCAG AA Compliance)
+
+**Vấn đề:** Nhiều yếu tố UI dùng màu `#8b949e` cho text nội dung trên nền `#0d1117`
+— tương phản ~4.1:1, dưới ngưỡng WCAG AA (4.5:1).
+
+| Phần tử | Trước | Sau | Lý do |
+|---|---|---|---|
+| `.rbox` text (nội dung review) | `#8b949e` | `#b8c0cc` | Đạt WCAG AA (~6:1) |
+| `.rbox strong` (tên reviewer) | `#c9d1d9` | `#e6edf3` | Nổi bật hơn |
+| `.rbox em` (rating) | mặc định | `#8b949e`, không in nghiêng | Nhất quán |
+| `.hero p` (mô tả trang chủ) | `#8b949e` | `#c9d1d9` | Dễ đọc hơn |
+| `.alert-i`, `.alert-g` text | `#58a6ff`/`#3fb950` | `#c9d1d9` | Body text, không nên dùng accent color |
+| `.chip` mặc định | `#8b949e` | `#c9d1d9` | Chip label cần đọc được |
+| Quick-search buttons | `color:#8b949e` / `bg:#21262d` | `color:#c9d1d9` / `bg:#1c2128` | Tương phản rõ hơn |
+| Keyword tags (`.theme-tag`) | `#d2a520` | `#e6c94a` | Sáng hơn trên nền tối |
+
+Thêm 2 class CSS mới: `.theme-tag-genre` (xanh dương) và `.theme-tag-tone` (xanh lá)
+— sẵn sàng cho phân loại keyword theo nhóm (Nhưu tiên 2 trong UI Plan).
+
+---
+
+### Thay đổi 2 – Từ Khoá Phong Phú Hơn (`get_enriched_keywords`)
+
+**Thay thế:** `get_top_keywords(n=10)` → `get_enriched_keywords(n=12)`
+
+**Thuật toán mới:**
+```
+1. Tính vector TF-IDF trung bình của các phim đã chọn (giống cũ)
+2. Phân tách feature names thành 2 nhóm:
+   │
+   ├─ N-gram (chứa khoảng trắng): bigram, trigram
+   └─ Unigram (một từ) cưa lọc _GENERIC_TERMS
+3. Xếp hạng từng nhóm theo điểm TF-IDF
+4. Lấy top-60% từ n-gram + top-40% từ unigram
+5. Sắp xếp lại theo điểm giảm dần
+```
+
+**`_GENERIC_TERMS` (ồ từ bị loại):**
+```python
+{"film", "movie", "story", "scene", "character", "plot", "time",
+ "watch", "great", "good", "best", "little", "just", "like", "make",
+ "really", "made", "one", "also", "even", "first", "well", "much",
+ "think", "many", "people", "way", "year", "show", "series", "part",
+ "get", "see", "know", "going", "come", "give", "take", "would",
+ "could", "never", "still", "another", "pretty", "quite", "better"}
+```
+
+**Kết quả mong đợi:** Thay vì đưa ra `["captain", "america", "good", "great", "film"]`,
+năng đưa ra `["captain america", "super hero", "avengers", "action packed", "marvel"]` —
+ý nghĩa hơn nhiều.
+
+---
+
+### Thay đổi 3 – Snippet Review + Expander "Xem Đầy Đủ"
+
+**Trước:** Hiển thị 320 ký tự — vẫn quá dài, làm tắt cả 3 review chồng lấp nhau.
+
+**Sau:** Hằng số `SNIPPET_LEN = 150` ký tự, thêm nút expander nếu review dài hơn.
+
+```
+Hiển thị mặc định (150 ký tự):
+  reviewer ★★★★★ (10/10)
+  The film was absolutely incredible in every...
+
+  [▼ Xem đầy đủ review]  ← expander chỉ xuất hiện nếu review > 150 ký tự
+    reviewer ★★★★★ (10/10)
+    The film was absolutely incredible in every aspect...
+    [toàn bộ nội dung, border xanh phân biệt]
+```
+
+Spoiler review: vẫn ẩn toàn bộ trong expander cảnh báo, nay hiển thị dưới dạng `.rbox`
+tương thích thay vì `st.write` thô.
+
+---
+
+### Thay đổi 4 – Layout Poster Phim (iTunes/Wiki Fallback)
+
+**Cấu trúc mới của `render_result_list()`:**
+```
+[Col 1/5 – poster]  [Col 4/5 – nội dung                        ]
++------------------+  +------------------------------------------+
+|  [Poster ảnh]   |  |  #1 🎬 Tên phìm                           |
+|  hoặc           |  |  [Cosine] [SVD] [Tổng hợp]              |
+|  [🎬 placeholder]|  |  [███████████████████████████████]       |
+|                  |  |  [📝 Đánh giá] [▶️ Trailer]              |
++------------------+  +------------------------------------------+
+```
+
+- **Chiến lược API không cần đăng ký:** Sử dụng `iTunes Search API` làm ưu tiên 1 (ảnh sắc nét, ổn định), dự phòng `Wikipedia REST API` làm ưu tiên 2.
+- **Cache tĩnh:** Ảnh được lưu cache trong phiên bản 24 giờ với `@st.cache_data`.
+- **Không tìm thấy:** Hiển thị `<div class="poster-ph">🎬</div>` — dark card có icon,
+  giao diện vẫn gọn gàng.
+- **Lợi ích lớn nhất:** Người dùng (và ban giám khảo) không cần đăng ký hay khai báo số điện thoại để cấu hình API.
+
+---
+
+### Thay đổi 5 – Hằng Số và Cấu Hình Tập Trung
+
+Thêm vào khối "HẰNG SỐ" đầu file:
+
+```python
+SNIPPET_LEN  = 150       # Số ký tự hiển thị trực tiếp trong review box
+```
+
+---
+
+### Tổng Kết Thay Đổi v5
+
+| Thay đổi | File | Dòng mã | Ảnh hưởng chức năng |
+|---|---|---|---|
+| Fix màu 9 phần tử CSS | `main_web.py` | CSS block | Không |
+| `_GENERIC_TERMS` + `get_enriched_keywords` | `main_web.py` | ~30 dòng mới | Không (chỉ hiển thị) |
+| `SNIPPET_LEN=150` + expander | `main_web.py` | `render_reviews_section` | Không |
+| `fetch_poster_url` (iTunes/Wiki) | `main_web.py` | ~30 dòng mới | Không |
+| Layout 2 cột poster | `main_web.py` | `render_result_list` | Không |
+| Hằng số `SNIPPET_LEN` | `main_web.py` | HẰNG SỐ block | Không |
+| Mô hình / Training pipeline | **Không đụng** | — | — |
+
+*KPDL_DoAn 2026 – Cập nhật tự động*
+
+---
+
+## 12. Nhật Ký Nâng Cấp Toàn Diện v6 (21/05/2026)
+
+> **Phạm vi:** Cả 	rain_SVM_cosine_SVD.py và main_web.py
+
+### TRAIN – Weighted TF-IDF Movie Profile
+Trọng số review = log(rating+1)/log(11). Rating 10 → weight 1.0, rating 7 → weight 0.90.  
+Profile phim = tổng có trọng số TF-IDF thay vì concat text đơn giản.
+
+### TRAIN – Quality Filtering
+Lọc review < 10 từ (spam) và > 2000 từ (auto-generated). Không đụng SVM pipeline.
+
+### TRAIN – Offline Evaluation (Precision@K, NDCG@K, ILD)
+Đánh giá hệ thống gợi ý offline trên mẫu 200 user. Kết quả append vào evaluation_metrics.txt.
+
+### WEB – MMR Reranking
+MMR_score = λ × relevance − (1−λ) × max_sim_to_selected  λ=0.6.  
+Tránh gợi ý liên tiếp các phần của cùng 1 series.
+
+### WEB – Hybrid Weight Slider
+Slider trên Sidebar: w_cosine ∈ [0.3, 1.0]. Score = w×Cosine + (1−w)×SVD.
+
+### WEB – Poster Placeholder Thẩm Mỹ
+Hash color từ tên phim (HSL) + chữ viết tắt (initials). Không cần API. Layout không vỡ.
+
+### WEB – Explainability Keywords
+Hiển thị keywords giao thoa giữa query vector và movie vector cho từng kết quả.
+
+| Thay đổi | Ảnh hưởng lý thuyết |
+|---|---|
+| Weighted profile, quality filter, offline eval | Không |
+| MMR, hybrid slider, poster placeholder, explainability | Không |
+| Lý thuyết SVM/TF-IDF/Cosine/SVD | Giữ nguyên |

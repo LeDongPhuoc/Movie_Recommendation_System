@@ -1,0 +1,70 @@
+[!] Đang đọc file IMDb metadata từ title.basics.tsv...
+-> Đang làm sạch tên phim từ file Metadata...
+-> Đang khớp tên phim trong file JSON...
+-> Giữ lại 586,285/889,206 reviews (65.9%).
+  [Dữ liệu gốc] Positive: 359,698 | Negative: 139,378 | Tỷ lệ: 2.58:1
+  [Undersample POS] Giảm Positive xuống 209,067 (tỷ lệ mục tiêu 1.5:1)
+  [Sau cân bằng]   Positive: 209,067 | Negative: 139,378 | Tỷ lệ: 1.50:1
+Đang tiền xử lý văn bản nâng cao...
+Phân phối nhãn:
+label
+1    72951
+0    44435
+
+[1] Đang vector hóa TF-IDF nâng cao...
+  Train set: 93,908 mẫu | Test set: 23,478 mẫu
+  Phân phối nhãn TRAIN:
+label
+1    58360
+0    35548
+  Tỷ lệ pos:neg trong TRAIN = 1.64:1
+  [!] Tỷ lệ > 1.5:1 → Áp dụng RandomOverSampler cho lớp Negative...
+  Phân phối sau oversample: {1: 58360, 0: 38906}
+  Tỷ lệ pos:neg sau oversample = 1.50:1
+
+[2] Đang huấn luyện mô hình LinearSVC + Calibration...
+
+[3] Đánh giá mô hình trên tập TEST...
+============================================================
+    KẾT QUẢ ĐÁNH GIÁ MÔ HÌNH LinearSVC + Calibration
+============================================================
+
+--- CHỈ SỐ TỔNG QUAN ---
+  Accuracy              : 0.9100  (91.00%)
+  Precision (Weighted)  : 0.9097
+  Recall    (Weighted)  : 0.9100
+  F1-Score  (Weighted)  : 0.9097
+  Precision (Macro)     : 0.9068
+  Recall    (Macro)     : 0.9009
+  F1-Score  (Macro)     : 0.9037
+  ROC-AUC               : 0.9679
+
+--- MA TRẬN NHẦM LẪN (Confusion Matrix) ---
+[[ 7673  1214]
+ [  899 13692]]
+
+--- BÁO CÁO PHÂN LỚP CHI TIẾT ---
+              precision    recall  f1-score   support
+
+Negative (0)       0.90      0.86      0.88      8887
+Positive (1)       0.92      0.94      0.93     14591
+
+    accuracy                           0.91     23478
+   macro avg       0.91      0.90      0.90     23478
+weighted avg       0.91      0.91      0.91     23478
+
+============================================================
+-> Đã lưu kết quả đánh giá vào: Outputs\evaluation_metrics.txt
+
+[4] Đang chạy Cross-Validation (3-fold) để kiểm tra độ ổn định...
+  CV F1-Weighted: 0.9109 ± 0.0008
+
+[5] Đang xây dựng Hồ sơ Phim (Content-Based Filtering)...
+  -> Đã xây dựng profile cho 5,028 phim.
+
+[6] Đang phân rã ma trận User-Item bằng SVD...
+  -> SVD giải thích 20.4% phương sai.
+
+[7] Đang lưu mô hình Sentiment...
+
+✅ Hoàn tất toàn bộ pipeline trong 221.4s (3.7 phút).

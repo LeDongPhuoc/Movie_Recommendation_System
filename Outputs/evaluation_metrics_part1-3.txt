@@ -1,0 +1,30 @@
+TF-TDF từ 30000 -> 50000
+============================================================
+    KẾT QUẢ ĐÁNH GIÁ MÔ HÌNH LinearSVC + Calibration
+============================================================
+
+--- CHỈ SỐ TỔNG QUAN ---
+  Accuracy              : 0.9169  (91.69%)
+  Precision (Weighted)  : 0.9167
+  Recall    (Weighted)  : 0.9169
+  F1-Score  (Weighted)  : 0.9167
+  Precision (Macro)     : 0.9144
+  Recall    (Macro)     : 0.9090
+  F1-Score  (Macro)     : 0.9116
+  ROC-AUC               : 0.9718
+
+--- MA TRẬN NHẦM LẪN (Confusion Matrix) ---
+[[ 8029  1144]
+ [  846 13940]]
+
+--- BÁO CÁO PHÂN LỚP CHI TIẾT ---
+              precision    recall  f1-score   support
+
+Negative (0)       0.90      0.88      0.89      9173
+Positive (1)       0.92      0.94      0.93     14786
+
+    accuracy                           0.92     23959
+   macro avg       0.91      0.91      0.91     23959
+weighted avg       0.92      0.92      0.92     23959
+
+============================================================
