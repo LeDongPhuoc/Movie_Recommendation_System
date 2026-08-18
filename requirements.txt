@@ -1,0 +1,12 @@
+streamlit
+pandas
+numpy
+scikit-learn
+imbalanced-learn
+scipy
+nltk
+joblib
+requests
+matplotlib
+seaborn
+deep-translator

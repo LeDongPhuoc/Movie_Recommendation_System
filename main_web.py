@@ -1,20 +1,25 @@
 """
-main_web.py  –  CineMatch v5
+main_web.py  – 
 Giao diện Streamlit: SVM Sentiment · TF-IDF Cosine · SVD Collaborative Filtering
 
-Cải tiến v5:
-  1. MMR (Maximal Marginal Relevance) reranking – tăng diversity gợi ý
-  2. Hybrid weight slider – người dùng tự điều chỉnh Cosine/SVD ratio
-  3. Poster: iTunes API → Wikipedia API → Placeholder HTML đẹp (hash color + initials)
-  4. Explainability: hiển thị từ khoá giao thoa (intersection keywords) theo từng phim
-  5. Màu chữ WCAG AA, enriched keywords, snippet review + expander
-  6. Loading states, error handling chuyên nghiệp
+  1. Thư mục bảo mật LuuTruDuLieu/ chứa user_accounts.json.
+  2. Đăng ký, Đăng nhập, Đăng xuất người dùng thực sự với mã hóa SHA-256.
+  3. Quản lý danh sách phim yêu thích cá nhân hóa (Favorite list) giải quyết Cold-start.
+  4. Trực quan gợi ý động " Gợi Ý Dành Riêng Cho Bạn" (Netflix-style) trên Trang Chủ.
+  5. Nút "Yêu thích" trực tiếp trên từng card phim.
+  6. Bảo lưu kết quả tìm kiếm thông qua Streamlit Session State.
+  7. Tab " Hồ Sơ Của Tôi" với phân tích gu phim của bạn (AI Taste Profiling) tự động.
 """
 
 import hashlib
 import os
 import re
 import urllib.parse
+import json
+import datetime
+import warnings
+
+warnings.filterwarnings("ignore")
 
 import joblib
 import numpy as np
@@ -28,9 +33,49 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="CineMatch – Gợi Ý Phim AI",
-    page_icon="🎬",
+    page_icon="",
     layout="wide",
 )
+
+# ---------------------------------------------------------------------------
+# QUẢN LÝ TÀI KHOẢN & LƯU TRỮ DỮ LIỆU
+# ---------------------------------------------------------------------------
+DATA_DIR = "LuuTruDuLieu"
+USER_ACCOUNTS_FILE = os.path.join(DATA_DIR, "user_accounts.json")
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+def load_user_accounts():
+    if os.path.exists(USER_ACCOUNTS_FILE):
+        try:
+            with open(USER_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_user_accounts(accounts):
+    with open(USER_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(accounts, f, ensure_ascii=False, indent=2)
+
+def hash_password(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+# Khởi tạo các trạng thái session state cho Streamlit
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.username = None
+    st.session_state.favorites = []
+    st.session_state.ratings = {}
+    st.session_state.reviews = {}
+if "search_results" not in st.session_state:
+    st.session_state.search_results = None
+if "search_query_en" not in st.session_state:
+    st.session_state.search_query_en = None
+if "search_q_vec" not in st.session_state:
+    st.session_state.search_q_vec = None
+if "search_is_pers" not in st.session_state:
+    st.session_state.search_is_pers = False
 
 # ---------------------------------------------------------------------------
 # CSS TOÀN CỤC
@@ -123,7 +168,13 @@ div[data-testid="column"] .stButton>button:hover{
 # ---------------------------------------------------------------------------
 # HẰNG SỐ
 # ---------------------------------------------------------------------------
-OUTPUT_DIR           = "Outputs"
+
+TMDB_API_KEY         = "591e629d8c6a47350b7d9a9e74f1b414" 
+
+if os.path.exists("Experiments/v8_svd_500"):
+    OUTPUT_DIR = "Experiments/v8_svd_500"
+else:
+    OUTPUT_DIR = "Experiments/v7_final_750k_svd300"
 MAX_USERS_IN_SIDEBAR = 50    # Giới hạn user hiển thị trong selectbox
 SNIPPET_LEN          = 150   # Ký tự tối đa trong snippet review
 MMR_LAMBDA           = 0.6   # λ trong MMR: cao → ưu tiên relevance; thấp → ưu tiên diversity
@@ -132,7 +183,7 @@ MMR_LAMBDA           = 0.6   # λ trong MMR: cao → ưu tiên relevance; thấp
 # ---------------------------------------------------------------------------
 # TẢI MÔ HÌNH
 # ---------------------------------------------------------------------------
-@st.cache_resource(show_spinner="⏳ Đang tải mô hình AI...")
+@st.cache_resource(show_spinner="Đang tải mô hình huấn luyện...")
 def load_models():
     """Tải toàn bộ artifact. Dừng app nếu thiếu file."""
     required_files = [
@@ -145,7 +196,7 @@ def load_models():
     ]
     missing = [f for f in required_files if not os.path.exists(os.path.join(OUTPUT_DIR, f))]
     if missing:
-        st.error(f"❌ Thiếu file mô hình: {missing}\n→ Chạy `train_SVM_cosine_SVD.py` trước!")
+        st.error(f"Thiếu file mô hình: {missing}\n→ Chạy `train_SVM_cosine_SVD.py` trước!")
         st.stop()
     return tuple(joblib.load(os.path.join(OUTPUT_DIR, f)) for f in required_files)
 
@@ -166,10 +217,10 @@ def build_imdb_url(title: str) -> str:
 
 
 def rating_to_stars(rating) -> str:
-    """Chuyển điểm 1–10 thành chuỗi sao ★☆ (thang 5 sao)."""
+    """Chuyển điểm 1–10 thành chuỗi sao (thang 5 sao)."""
     try:
         n = int(round(float(rating) / 2))
-        return "★" * n + "☆" * (5 - n)
+        return "⭐" * n + "☆" * (5 - n)
     except (ValueError, TypeError):
         return ""
 
@@ -189,7 +240,7 @@ def _make_initials(title: str) -> str:
     """Trích xuất chữ cái đầu của mỗi từ trong tên phim, tối đa 3 ký tự."""
     words = re.sub(r"[^a-zA-Z0-9 ]", "", title).split()
     initials = "".join(w[0].upper() for w in words if w)
-    return initials[:3] if initials else "🎬"
+    return initials[:3] if initials else ""
 
 
 def _hash_color(title: str) -> str:
@@ -218,49 +269,58 @@ def _render_poster_placeholder(title: str) -> None:
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
-def fetch_poster_url(movie_title: str) -> str | None:
+def fetch_poster_url(movie_title: str, tmdb_api_key: str = "") -> str | None:
     """
-    Tìm URL poster phim (không cần API key).
-    Fallback chain: iTunes Search API → Wikipedia REST API → None.
+    Tìm URL poster phim.
+    Nếu có TMDB API key → dùng TMDB.
+    Nếu không → Trả về None để render HTML placeholder.
     Cache 24 giờ để tránh gọi API liên tục.
     """
-    # 1. iTunes Search API – chất lượng tốt, không cần key
-    try:
-        r = requests.get(
-            "https://itunes.apple.com/search",
-            params={"term": movie_title, "media": "movie", "limit": 1, "entity": "movie"},
-            timeout=3,
-        )
-        results = r.json().get("results", [])
-        if results:
-            url = results[0].get("artworkUrl100", "")
-            if url:
-                return url.replace("100x100bb", "300x300bb")
-    except Exception:
-        pass
+    if tmdb_api_key:
+        try:
+            clean_title = movie_title
+            year = ""
+            match = re.search(r'\s*\((\d{4})\)', movie_title)
+            if match:
+                year = match.group(1)
+                clean_title = movie_title[:match.start()].strip()
 
-    # 2. Wikipedia REST API – dự phòng
-    try:
-        r = requests.get(
-            f"https://en.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(movie_title)}",
-            timeout=3,
-        )
-        if r.status_code == 200:
-            url = r.json().get("thumbnail", {}).get("source")
-            if url:
-                return url
-    except Exception:
-        pass
+            params_vi = {"api_key": tmdb_api_key, "query": clean_title, "language": "vi-VN"}
+            params_en = {"api_key": tmdb_api_key, "query": clean_title}
+            if year:
+                params_vi["primary_release_year"] = year
+                params_en["primary_release_year"] = year
+
+            r = requests.get(
+                "https://api.themoviedb.org/3/search/movie",
+                params=params_vi,
+                timeout=3,
+            )
+            if r.status_code == 200:
+                results = r.json().get("results", [])
+                if not results:
+                    r = requests.get(
+                        "https://api.themoviedb.org/3/search/movie",
+                        params=params_en,
+                        timeout=3,
+                    )
+                    if r.status_code == 200:
+                        results = r.json().get("results", [])
+                if results and results[0].get("poster_path"):
+                    return f"https://image.tmdb.org/t/p/w500{results[0]['poster_path']}"
+            else:
+                print(f"[TMDB API Error] HTTP {r.status_code} for '{movie_title}'. Key: {tmdb_api_key}. Response: {r.text}")
+        except Exception as e:
+            print(f"[TMDB Connection Error] Fail to connect for '{movie_title}': {e}")
 
     return None  # → Caller dùng _render_poster_placeholder
 
 
-def render_poster(title: str) -> None:
+def render_poster(title: str, tmdb_api_key: str = "") -> None:
     """
     Render poster phim. Nếu không tìm được URL → render placeholder HTML đẹp.
-    Placeholder dùng màu hash từ tên phim + chữ viết tắt.
     """
-    poster_url = fetch_poster_url(title)
+    poster_url = fetch_poster_url(title, tmdb_api_key)
     if poster_url:
         st.image(poster_url, use_container_width=True)
     else:
@@ -284,9 +344,6 @@ _GENERIC_TERMS = {
 def get_enriched_keywords(vec_matrix, vectorizer, n: int = 12) -> list[str]:
     """
     Trích xuất từ khoá phong phú từ vector TF-IDF trung bình.
-    - Lọc từ quá chung (_GENERIC_TERMS)
-    - Ưu tiên bigram/trigram (60%) trước unigram (40%)
-    - Trả về n từ khoá đa dạng
     """
     feature_names = vectorizer.get_feature_names_out()
     avg_vec = np.asarray(vec_matrix.mean(axis=0)).flatten()
@@ -316,26 +373,17 @@ def get_movie_explain_keywords(
     """
     Explainability: Trích xuất từ khoá giao thoa giữa truy vấn/gu người dùng
     và hồ sơ của phim cụ thể.
-
-    Cách tính:
-      - Lấy min(query_vec, movie_vec) theo từng feature → phần giao thoa
-      - Top N features trong phần giao thoa = lý do gợi ý
-
-    Ý nghĩa: "Phim này được gợi ý vì cùng nói về [keyword1], [keyword2]..."
     """
     feature_names = vectorizer.get_feature_names_out()
     movie_vec     = np.asarray(content_matrix[movie_idx].todense()).flatten()
 
-    # Nếu query_vec là sparse matrix, chuyển thành dense
     if hasattr(query_vec, "toarray"):
         q_vec = np.asarray(query_vec.toarray()).flatten()
     else:
         q_vec = np.asarray(query_vec).flatten()
 
-    # Giao thoa = element-wise minimum (cả hai phải có giá trị > 0)
     intersection = np.minimum(q_vec, movie_vec)
 
-    # Lọc từ quá chung và chỉ lấy n-gram hoặc unigram có nghĩa
     valid_idx = [
         i for i, f in enumerate(feature_names)
         if intersection[i] > 0 and f not in _GENERIC_TERMS
@@ -345,21 +393,70 @@ def get_movie_explain_keywords(
 
 
 # ---------------------------------------------------------------------------
-# HELPERS – SVD PERSONALIZATION
+# HELPERS – SVD & PROFILE PERSONALIZATION
 # ---------------------------------------------------------------------------
 def _is_personalized(user_key: str) -> bool:
-    """Kiểm tra xem user_key có trong SVD model không."""
-    return user_key != "🎭 Khách (Cold-start)" and user_key in svd_data["user_map"]
+    """Kiểm tra xem user_key có phải là user cá nhân hóa hay không."""
+    if user_key.startswith("Tài khoản của tôi"):
+        return st.session_state.logged_in and len(st.session_state.favorites) > 0
+    return user_key != "Khách (Cold-start)" and user_key in svd_data["user_map"]
 
 
 def _compute_svd_scores(candidate_movies: pd.Series, user_key: str) -> np.ndarray:
     """
-    Tính điểm SVD cho danh sách phim ứng viên.
-    Điểm = dot product(user_factor, item_factor).
-    Trả về mảng 0 nếu cold-start.
+    Tính điểm SVD hoặc điểm tương đồng sở thích cho danh sách phim ứng viên.
     """
     scores = np.zeros(len(candidate_movies))
-    if _is_personalized(user_key):
+    if user_key.startswith("Tài khoản của tôi"):
+        if st.session_state.logged_in and st.session_state.favorites:
+            movie_to_idx = {row["movie"]: idx for idx, row in movie_profiles.iterrows()}
+            
+            # Tính vector gu trung bình có trọng số dựa trên TF-IDF của phim yêu thích
+            weights = []
+            valid_idxs = []
+            for m in st.session_state.favorites:
+                if m in movie_to_idx:
+                    idx = movie_to_idx[m]
+                    valid_idxs.append(idx)
+                    rating = 10
+                    if "ratings" in st.session_state:
+                        rating = st.session_state.ratings.get(m, 10)
+                    w = rating / 10.0
+                    weights.append(w)
+                    
+            if valid_idxs:
+                sel_matrix = content_matrix[valid_idxs]
+                import scipy.sparse as sp
+                W_sparse = sp.diags(weights)
+                total_vec = W_sparse.dot(sel_matrix).sum(axis=0)
+                
+                total_w = sum(weights)
+                if total_w > 0:
+                    user_vec = total_vec / total_w
+                else:
+                    user_vec = sel_matrix.mean(axis=0)
+                
+                if hasattr(user_vec, "toarray"):
+                    user_vec = user_vec.toarray()
+                elif hasattr(user_vec, "A"):
+                    user_vec = user_vec.A
+                else:
+                    user_vec = np.asarray(user_vec)
+                
+                user_vec = np.asarray(user_vec).reshape(1, -1)
+                for i, title in enumerate(candidate_movies):
+                    if title in movie_to_idx:
+                        m_idx = movie_to_idx[title]
+                        cand_vec = content_matrix[m_idx]
+                        if hasattr(cand_vec, "toarray"):
+                            cand_vec = cand_vec.toarray()
+                        elif hasattr(cand_vec, "A"):
+                            cand_vec = cand_vec.A
+                        else:
+                            cand_vec = np.asarray(cand_vec)
+                        cand_vec = np.asarray(cand_vec).reshape(1, -1)
+                        scores[i] = cosine_similarity(user_vec, cand_vec)[0][0]
+    elif _is_personalized(user_key):
         u_vec = svd_data["user_factors"][svd_data["user_map"][user_key]]
         for i, title in enumerate(candidate_movies):
             if title in svd_data["movie_map"]:
@@ -374,11 +471,7 @@ def _blend_scores(
     w_cos: float = 0.6,
 ) -> np.ndarray:
     """
-    Hybrid Scoring:
-      Score = w_cos × Cosine_norm + (1 - w_cos) × SVD_norm   [nếu có user]
-      Score = Cosine_norm                                       [cold-start]
-
-    Tham số w_cos được truyền từ UI slider → người dùng tự điều chỉnh.
+    Hybrid Scoring: Kết hợp điểm Content-Based và Cá nhân hóa.
     """
     if not is_pers:
         return cos_norm  # 100% Content-Based khi cold-start
@@ -397,36 +490,14 @@ def mmr_rerank(
 ) -> pd.DataFrame:
     """
     Maximal Marginal Relevance (MMR) – tái xếp hạng để tăng diversity.
-
-    Thuật toán:
-      1. Khởi tạo: selected = {}; remaining = tất cả candidates
-      2. Vòng lặp (n lần):
-         a. Với mỗi phim r trong remaining, tính:
-            MMR_score(r) = λ × final_score(r) − (1−λ) × max_sim(r, selected)
-         b. Chọn phim có MMR_score cao nhất vào selected
-         c. Loại phim đó khỏi remaining
-
-    Ý nghĩa của λ (MMR_LAMBDA):
-      λ = 1.0 → giống sort bình thường (không rerank)
-      λ = 0.5 → cân bằng relevance và diversity
-      λ = 0.0 → tối đa hóa diversity hoàn toàn
-
-    Tại sao không dùng sort thông thường?
-      - Sort thông thường có thể gợi ý 5 phần Harry Potter liên tiếp
-      - MMR chọn phim Harry Potter 1, rồi phim tiếp theo phải vừa liên quan
-        vừa khác biệt → có thể chọn 1 phim fantasy khác thay vì HP2
-
-    Returns:
-      DataFrame đã được rerank theo MMR
     """
     if len(candidates) <= top_n:
         return candidates.reset_index(drop=True)
 
-    # Reset index để dùng positional indexing
     cands = candidates.reset_index(drop=True)
     scores = cands["final"].values
 
-    selected_indices  = []  # indices đã chọn vào kết quả
+    selected_indices  = []
     remaining_indices = list(range(len(cands)))
 
     for _ in range(top_n):
@@ -439,7 +510,6 @@ def mmr_rerank(
         for r in remaining_indices:
             relevance = scores[r]
 
-            # Tính độ tương đồng với các phim đã chọn
             if selected_indices:
                 r_vec    = content_matrix_sub[[r]]
                 s_vecs   = content_matrix_sub[selected_indices]
@@ -473,21 +543,15 @@ def recommend_by_query(
 ) -> tuple[pd.DataFrame, bool, object]:
     """
     Gợi ý dựa trên truy vấn văn bản (Content-Based + SVD tuỳ chọn + MMR).
-
-    Returns:
-      results  : DataFrame top_n phim với cột cos_norm, svd_norm, final
-      is_pers  : True nếu có cá nhân hóa SVD
-      q_vec    : vector truy vấn TF-IDF (dùng cho explainability)
     """
     q_vec   = tfidf_vec.transform([query_en])
     cos_raw = cosine_similarity(q_vec, content_matrix).flatten()
 
-    # Lấy top-150 ứng viên để MMR có đủ "pool" để chọn
     pool_size = max(150, top_n * 15)
     top_idx   = cos_raw.argsort()[-pool_size:][::-1]
     cands     = movie_profiles.iloc[top_idx].copy().reset_index(drop=True)
     cands["cos_raw"]       = cos_raw[top_idx]
-    cands["_matrix_idx"]   = top_idx          # lưu index gốc để lookup matrix
+    cands["_matrix_idx"]   = top_idx
     cands = cands[cands["cos_raw"] > 0].reset_index(drop=True)
 
     if cands.empty:
@@ -501,11 +565,9 @@ def recommend_by_query(
         cands["cos_norm"].values, cands["svd_norm"].values, is_pers, w_cos
     )
 
-    # Sắp xếp theo final score trước khi MMR
     cands = cands.sort_values("final", ascending=False)
 
     if use_mmr and len(cands) > top_n:
-        # Xây dựng sub-matrix từ các candidates
         matrix_idxs = cands["_matrix_idx"].tolist()
         sub_matrix  = content_matrix[matrix_idxs]
         cands = mmr_rerank(cands, sub_matrix, top_n)
@@ -524,22 +586,45 @@ def recommend_by_movies(
     use_mmr: bool = True,
 ) -> tuple[pd.DataFrame, list[str], object]:
     """
-    Gợi ý dựa trên danh sách phim đã xem.
-    Tính vector "gu" trung bình → Cosine với catalogue → Hybrid + MMR.
-
-    Returns:
-      results  : DataFrame top_n phim gợi ý
-      keywords : từ khoá đặc trưng của phim đã chọn
-      avg_vec  : vector "gu" trung bình (dùng cho explainability)
+    Gợi ý dựa trên danh sách phim đã thích.
     """
     selected_set = set(selected_titles)
-    idxs = [i for i, m in enumerate(movie_profiles["movie"]) if m in selected_set]
-    if not idxs:
+    movie_to_idx = {row["movie"]: idx for idx, row in movie_profiles.iterrows()}
+    valid_idxs = []
+    weights = []
+    for m in selected_titles:
+        if m in movie_to_idx:
+            idx = movie_to_idx[m]
+            valid_idxs.append(idx)
+            rating = 10
+            if st.session_state.logged_in and "ratings" in st.session_state:
+                rating = st.session_state.ratings.get(m, 10)
+            w = rating / 10.0
+            weights.append(w)
+            
+    if not valid_idxs:
         return pd.DataFrame(), [], None
 
-    sel_matrix = content_matrix[idxs]
-    avg_vec    = np.asarray(sel_matrix.mean(axis=0)).reshape(1, -1)  # (1, n_features)
-    cos_raw    = cosine_similarity(avg_vec, content_matrix).flatten()
+    sel_matrix = content_matrix[valid_idxs]
+    import scipy.sparse as sp
+    W_sparse = sp.diags(weights)
+    total_vec = W_sparse.dot(sel_matrix).sum(axis=0)
+    
+    total_w = sum(weights)
+    if total_w > 0:
+        avg_vec = total_vec / total_w
+    else:
+        avg_vec = sel_matrix.mean(axis=0)
+        
+    if hasattr(avg_vec, "toarray"):
+        avg_vec = avg_vec.toarray()
+    elif hasattr(avg_vec, "A"):
+        avg_vec = avg_vec.A
+    else:
+        avg_vec = np.asarray(avg_vec)
+        
+    avg_vec = np.asarray(avg_vec).reshape(1, -1)
+    cos_raw = cosine_similarity(avg_vec, content_matrix).flatten()
 
     cands = movie_profiles.copy().reset_index(drop=True)
     cands["cos_raw"]     = cos_raw
@@ -590,24 +675,28 @@ def render_movie_card(
     explain_keywords: list[str] | None = None,
 ) -> None:
     """
-    Render card phim với:
-    - Thanh điểm số (gradient)
-    - Chips Cosine / SVD / Tổng hợp
-    - (Tuỳ chọn) Keywords giải thích tại sao phim được gợi ý
+    Render card phim đẹp mắt với thanh gradient và chips.
     """
     pct = final * 100
     explain_html = ""
     if explain_keywords:
         chips = " ".join(
-            f'<span class="theme-tag-ex">🔑 {kw}</span>'
+            f'<span class="theme-tag-ex">{kw}</span>'
             for kw in explain_keywords
         )
         explain_html = f'<div style="margin-top:8px;">{chips}</div>'
 
+    rating_html = ""
+    if st.session_state.logged_in and "ratings" in st.session_state and title in st.session_state.ratings:
+        my_rating = st.session_state.ratings[title]
+        stars = rating_to_stars(my_rating)
+        rating_html = f'<div style="margin-top:6px; color:#ffc107; font-size:0.9rem; font-weight:600;">Đánh giá của bạn: {stars} ({my_rating}/10)</div>'
+
     st.markdown(f"""
     <div class="mcard">
       <div><span class="rank">#{rank}</span>
-           <span class="mcard-title">🎬 {title}</span></div>
+           <span class="mcard-title">{title}</span></div>
+      {rating_html}
       <div style="margin-top:6px;">
         <span class="chip chip-b">Cosine {cos_n:.3f}</span>
         <span class="chip chip-g">SVD {svd_n:.3f}</span>
@@ -620,15 +709,34 @@ def render_movie_card(
 
 def render_reviews_section(movie_title: str) -> None:
     """
-    Render 3 review hàng đầu:
-    - Non-spoiler: snippet SNIPPET_LEN ký tự + expander "Xem đầy đủ"
-    - Spoiler: ẩn trong expander có cảnh báo
+    Render review và xử lý review spoiler.
     """
+    # 1. Hiển thị nhận xét cá nhân của người dùng hiện tại lên đầu tiên
+    has_personal = False
+    if st.session_state.logged_in:
+        my_rating = st.session_state.ratings.get(movie_title)
+        my_review = st.session_state.reviews.get(movie_title)
+        
+        if my_rating is not None or my_review:
+            has_personal = True
+            stars_str = rating_to_stars(my_rating) if my_rating is not None else ""
+            rating_text = f" ({my_rating}/10)" if my_rating is not None else ""
+            review_text = my_review if my_review else "(Không có nội dung nhận xét)"
+            
+            st.markdown(
+                f'<div class="rbox" style="border-left-color: #58a6ff; background-color: rgba(56, 139, 253, 0.1);">'
+                f'<strong style="color: #58a6ff;">[ĐÁNH GIÁ CỦA BẠN]</strong> {stars_str} {rating_text}<br>'
+                f'{review_text}</div>',
+                unsafe_allow_html=True
+            )
+            st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
+
     sub         = reviews_db[reviews_db["movie"] == movie_title]
     top_reviews = sub.sort_values(["spoiler_tag", "rating"], ascending=[True, False]).head(3)
 
     if top_reviews.empty:
-        st.info("Chưa có đánh giá lưu trong hệ thống.")
+        if not has_personal:
+            st.info("Chưa có đánh giá lưu trong hệ thống.")
         return
 
     for _, rv in top_reviews.iterrows():
@@ -641,7 +749,7 @@ def render_reviews_section(movie_title: str) -> None:
         snippet   = text[:SNIPPET_LEN] + ("..." if has_more else "")
 
         if is_spoil:
-            with st.expander(f"⚠️ Review của {reviewer} – SPOILER (nhấn để xem)"):
+            with st.expander(f"Review của {reviewer} – SPOILER (nhấn để xem)"):
                 st.markdown(
                     f'<div class="rbox"><strong>{reviewer}</strong> {stars_str} '
                     f'<em>({rating}/10)</em><br>{text}</div>',
@@ -661,30 +769,92 @@ def render_reviews_section(movie_title: str) -> None:
                     )
 
 
-def render_links_section(movie_title: str) -> None:
-    """Render nút trailer YouTube và link IMDb."""
-    c1, c2 = st.columns(2)
+def render_links_section(movie_title: str, context: str = "fav") -> None:
+    """Render nút trailer YouTube, link IMDb và nút Thích phim."""
+    c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
-        st.link_button("▶️ Trailer YouTube", build_youtube_url(movie_title), use_container_width=True)
+        st.link_button(" Trailer YouTube", build_youtube_url(movie_title), use_container_width=True)
     with c2:
-        st.link_button("🎞️ Xem trên IMDb",  build_imdb_url(movie_title),   use_container_width=True)
-    st.caption("💡 Nhấn để mở tab mới.")
+        st.link_button(" Xem trên IMDb",  build_imdb_url(movie_title),   use_container_width=True)
+    with c3:
+        if st.session_state.logged_in:
+            is_fav = movie_title in st.session_state.favorites
+            btn_label = " Bỏ thích" if is_fav else " Thích phim"
+            btn_type = "secondary" if is_fav else "primary"
+            if st.button(btn_label, key=f"fav_{context}_{movie_title}_{btn_label}", type=btn_type, use_container_width=True):
+                accounts = load_user_accounts()
+                user = st.session_state.username
+                if is_fav:
+                    st.session_state.favorites.remove(movie_title)
+                    st.toast(f"Đã xoá '{movie_title}' khỏi danh sách yêu thích!")
+                else:
+                    st.session_state.favorites.append(movie_title)
+                    st.toast(f"Đã thêm '{movie_title}' vào yêu thích!")
+                accounts[user]["favorites"] = st.session_state.favorites
+                save_user_accounts(accounts)
+                st.rerun()
+        else:
+            st.button(" Đăng nhập để chọn phim yêu thích cho riêng bạn", key=f"fav_anon_{context}_{movie_title}", disabled=True, use_container_width=True)
+
+    if st.session_state.logged_in:
+        st.write("---")
+        st.markdown("##### Đánh giá & Nhận xét của bạn")
+        
+        current_rating = st.session_state.ratings.get(movie_title, 5)
+        current_review = st.session_state.reviews.get(movie_title, "")
+        
+        with st.form(key=f"rating_form_{context}_{movie_title}"):
+            rating_val = st.slider(
+                "Chọn số điểm (1 - 10 sao)",
+                min_value=1,
+                max_value=10,
+                value=int(current_rating),
+                key=f"slider_val_{context}_{movie_title}"
+            )
+            
+            stars_preview = rating_to_stars(rating_val)
+            st.markdown(f"**Điểm số chọn:** {stars_preview} ({rating_val}/10)")
+            
+            review_val = st.text_area(
+                "Nhận xét của bạn",
+                value=current_review,
+                placeholder="Nhập nhận xét ngắn về bộ phim này...",
+                key=f"review_val_{context}_{movie_title}"
+            )
+            
+            submit_btn = st.form_submit_button("Lưu Đánh Giá", type="primary")
+            if submit_btn:
+                accounts = load_user_accounts()
+                user = st.session_state.username
+                
+                st.session_state.ratings[movie_title] = rating_val
+                st.session_state.reviews[movie_title] = review_val
+                
+                if movie_title not in st.session_state.favorites:
+                    st.session_state.favorites.append(movie_title)
+                    st.toast(f"Đã thêm '{movie_title}' vào danh sách yêu thích!")
+                
+                accounts[user]["ratings"] = st.session_state.ratings
+                accounts[user]["reviews"] = st.session_state.reviews
+                accounts[user]["favorites"] = st.session_state.favorites
+                
+                save_user_accounts(accounts)
+                st.toast("Đã lưu đánh giá của bạn thành công!")
+                st.rerun()
+    else:
+        st.write("---")
+        st.info("Hãy đăng nhập để đánh giá và nhận xét bộ phim này.")
 
 
 def render_result_list(
     results: pd.DataFrame,
     query_vec=None,
+    tmdb_api_key: str = "",
+    context: str = "result",
 ) -> None:
     """
-    Render danh sách kết quả gợi ý:
-    - Cột trái: Poster (iTunes → Wiki → Placeholder HTML màu hash)
-    - Cột phải: Card phim (có Explainability keywords nếu có query_vec)
-                + Tab Đánh giá / Trailer
-
-    Tham số query_vec: vector truy vấn hoặc vector "gu" người dùng.
-    Dùng để tính intersection keywords (giải thích tại sao phim được gợi ý).
+    Render danh sách kết quả gợi ý.
     """
-    # Lập index: tên phim → vị trí trong content_matrix
     _movie_to_matrix_idx = {
         row["movie"]: idx for idx, row in movie_profiles.iterrows()
     }
@@ -692,7 +862,6 @@ def render_result_list(
     for rank, (_, row) in enumerate(results.iterrows(), start=1):
         title = row["movie"]
 
-        # Lấy keywords giải thích (chỉ khi có query vector)
         explain_kws = []
         if query_vec is not None and title in _movie_to_matrix_idx:
             m_idx = _movie_to_matrix_idx[title]
@@ -701,18 +870,18 @@ def render_result_list(
         col_poster, col_main = st.columns([1, 4], gap="medium")
 
         with col_poster:
-            render_poster(title)
+            render_poster(title, tmdb_api_key)
 
         with col_main:
             render_movie_card(
                 rank, title, row["final"], row["cos_norm"], row["svd_norm"],
                 explain_keywords=explain_kws,
             )
-            tab_reviews, tab_links = st.tabs(["📝 Đánh giá cộng đồng", "▶️ Trailer & Links"])
+            tab_reviews, tab_links = st.tabs(["Đánh giá cộng đồng", "Trailer & Tương tác"])
             with tab_reviews:
                 render_reviews_section(title)
             with tab_links:
-                render_links_section(title)
+                render_links_section(title, context=f"{context}_{rank}")
 
         st.markdown("---")
 
@@ -721,23 +890,94 @@ def render_result_list(
 # SIDEBAR
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### 🎬 CineMatch")
+    st.markdown("### CineMatch")
     st.caption("Hệ thống Gợi Ý Phim – SVM + TF-IDF + Cosine + SVD")
     st.divider()
 
-    top_n = st.slider("🎯 Số phim gợi ý", min_value=3, max_value=10, value=5)
+    # --- WIDGET QUẢN LÝ TÀI KHOẢN ---
+    st.markdown("#### Tài Khoản Người Dùng")
+    accounts = load_user_accounts()
 
-    st.markdown("**👤 Hồ sơ người dùng (SVD)**")
-    all_users     = list(svd_data["user_map"].keys())
+    if not st.session_state.logged_in:
+        acc_tab_login, acc_tab_register = st.tabs(["Đăng nhập", "Đăng ký"])
+        with acc_tab_login:
+            with st.form("login_form"):
+                login_user = st.text_input("Tên đăng nhập", key="sidebar_login_user")
+                login_pass = st.text_input("Mật khẩu", type="password", key="sidebar_login_pass")
+                submit_login = st.form_submit_button("Đăng nhập", type="primary", use_container_width=True)
+                if submit_login:
+                    if not login_user or not login_pass:
+                        st.error("Vui lòng điền đủ thông tin!")
+                    elif login_user in accounts and accounts[login_user]["password"] == hash_password(login_pass):
+                        st.session_state.logged_in = True
+                        st.session_state.username = login_user
+                        st.session_state.favorites = accounts[login_user].get("favorites", [])
+                        st.session_state.ratings = accounts[login_user].get("ratings", {})
+                        st.session_state.reviews = accounts[login_user].get("reviews", {})
+                        st.toast(f"Đăng nhập thành công! Chào {login_user}")
+                        st.rerun()
+                    else:
+                        st.error("Sai tài khoản hoặc mật khẩu!")
+        with acc_tab_register:
+            with st.form("register_form"):
+                reg_user = st.text_input("Tên đăng ký", key="sidebar_reg_user")
+                reg_pass = st.text_input("Mật khẩu mới", type="password", key="sidebar_reg_pass")
+                reg_pass_confirm = st.text_input("Xác nhận mật khẩu", type="password", key="sidebar_reg_pass_confirm")
+                submit_register = st.form_submit_button("Đăng ký tài khoản", type="primary", use_container_width=True)
+                if submit_register:
+                    if not reg_user or not reg_pass:
+                        st.error("Vui lòng điền đầy đủ thông tin!")
+                    elif reg_pass != reg_pass_confirm:
+                        st.error("Mật khẩu xác nhận không khớp!")
+                    elif reg_user in accounts:
+                        st.error("Tên tài khoản đã tồn tại!")
+                    else:
+                        accounts[reg_user] = {
+                            "password": hash_password(reg_pass),
+                            "favorites": [],
+                            "ratings": {},
+                            "reviews": {},
+                            "created_at": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                        }
+                        save_user_accounts(accounts)
+                        st.success("Đăng ký thành công! Hãy đăng nhập.")
+    else:
+        st.markdown(f"Chào mừng, **{st.session_state.username}**!")
+        st.caption(f"Số phim đã thích: **{len(st.session_state.favorites)}**")
+        
+        if st.button("Đăng xuất", type="secondary", use_container_width=True, key="btn_logout_sidebar"):
+            st.session_state.logged_in = False
+            st.session_state.username = None
+            st.session_state.favorites = []
+            st.session_state.ratings = {}
+            st.session_state.reviews = {}
+            st.session_state.search_results = None
+            st.session_state.search_query_en = None
+            st.toast("Đã đăng xuất!")
+            st.rerun()
+    st.divider()
+
+    top_n = st.slider("Số phim gợi ý", min_value=3, max_value=10, value=5)
+
+    st.markdown("**Hồ sơ người dùng (Cá nhân hóa SVD)**")
+    all_users = list(svd_data["user_map"].keys())
+    
+    options = ["Khách (Cold-start)"]
+    if st.session_state.logged_in:
+        options.append(f"Tài khoản của tôi ({st.session_state.username})")
+    options += all_users[:MAX_USERS_IN_SIDEBAR]
+    
     selected_user = st.selectbox(
         "Người dùng:",
-        options=["🎭 Khách (Cold-start)"] + all_users[:MAX_USERS_IN_SIDEBAR],
+        options=options,
         label_visibility="collapsed",
     )
     st.divider()
 
-    # Hybrid weight slider – cải tiến v5
-    st.markdown("**⚖️ Tỉ lệ Hybrid Scoring**")
+    tmdb_api_key = TMDB_API_KEY
+
+    # Hybrid weight slider
+    st.markdown("**Tỉ lệ Hybrid Scoring**")
     w_cosine = st.slider(
         "Content (Cosine) ↔ Collab (SVD)",
         min_value=0.3, max_value=1.0, value=0.6, step=0.05,
@@ -745,21 +985,20 @@ with st.sidebar:
         format="%.2f",
     )
     w_svd_display = 1.0 - w_cosine
-    st.caption(f"Cosine: **{w_cosine:.0%}** | SVD: **{w_svd_display:.0%}**")
+    st.caption(f"Cosine: **{w_cosine:.0%}** | SVD/Gu: **{w_svd_display:.0%}**")
     st.divider()
 
-    # MMR toggle
     use_mmr = st.checkbox(
-        "🔀 Bật MMR Diversity",
+        "Bật MMR Diversity",
         value=True,
         help="Maximal Marginal Relevance – giúp kết quả đa dạng hơn, tránh gợi ý các phần của cùng 1 series.",
     )
     st.divider()
 
-    with st.expander("⚙️ Về Hybrid Scoring & MMR"):
+    with st.expander("Về Hybrid Scoring & MMR"):
         st.markdown(f"""
 **Hybrid Scoring:**  
-`Score = {w_cosine:.0%} × Cosine + {w_svd_display:.0%} × SVD`
+`Score = {w_cosine:.0%} × Cosine + {w_svd_display:.0%} × SVD/Gu`
 
 Cả hai điểm đều được **normalize về [0,1]** trước khi kết hợp.
 
@@ -771,22 +1010,23 @@ Phạt điểm phim quá giống phim đã chọn → kết quả đa dạng hơ
 # ---------------------------------------------------------------------------
 # TABS CHÍNH
 # ---------------------------------------------------------------------------
-tab_home, tab_search, tab_exp = st.tabs([
-    "🏠  Trang Chủ",
-    "🔍  Gợi Ý Theo Từ Khoá",
-    "🎭  Trải Nghiệm Xem Phim",
+tab_home, tab_search, tab_exp, tab_profile = st.tabs([
+    " Trang Chủ",
+    " Gợi Ý Theo Từ Khoá",
+    " Trải Nghiệm Xem Phim",
+    " Hồ Sơ Của Tôi",
 ])
 
 # ══════════════════════════════ TAB HOME ════════════════════════════════════
 with tab_home:
     st.markdown("""
     <div class="hero">
-      <h1>🎬 CineMatch – Gợi Ý Phim Thông Minh</h1>
+      <h1>CineMatch – Gợi Ý Phim Thông Minh</h1>
       <p>Kết hợp Phân tích Cảm xúc (SVM), Độ tương đồng nội dung (TF-IDF + Cosine)
          và Lọc cộng tác (SVD) để gợi ý phim phù hợp nhất với bạn.</p>
     </div>""", unsafe_allow_html=True)
 
-    # Đọc SVM Accuracy từ file metrics (tên chuẩn)
+    # Đọc SVM Accuracy từ file metrics
     _metrics_path = os.path.join(OUTPUT_DIR, "evaluation_metrics.txt")
     _svm_accuracy = "N/A"
     if os.path.exists(_metrics_path):
@@ -813,32 +1053,57 @@ with tab_home:
         )
 
     st.markdown("---")
-    st.markdown("### 🏗️ Kiến Trúc Hybrid Pipeline")
+
+    # --- NETFLIX-STYLE PERSONALIZED RECOMMENDATION ON HOME TAB ---
+    if st.session_state.logged_in and st.session_state.favorites:
+        st.markdown("### 🎬 Gợi Ý Dành Riêng Cho Bạn")
+        st.markdown(
+            '<div class="alert-g">AI phân tích gu phim của bạn từ danh sách yêu thích và đề xuất các phim tương đồng tốt nhất:</div>',
+            unsafe_allow_html=True
+        )
+        
+        results_home, _, avg_vec_home = recommend_by_movies(
+            st.session_state.favorites, 
+            f"Tài khoản của tôi ({st.session_state.username})", 
+            top_n=5,
+            exclude_selected=True,
+            w_cos=w_cosine,
+            use_mmr=use_mmr
+        )
+        
+        if not results_home.empty:
+            render_result_list(results_home, query_vec=avg_vec_home, tmdb_api_key=tmdb_api_key, context="home")
+        else:
+            st.info("Chưa tìm thấy phim tương tự. Hãy thích thêm phim để AI học gu của bạn.")
+        st.markdown("---")
+
+    st.markdown("### Kiến Trúc Hybrid Pipeline")
     st.markdown(f"""
 | Tầng | Kỹ thuật | Vai trò |
 |---|---|---|
 | 1 | **Dịch thuật tự động** | Hỗ trợ truy vấn tiếng Việt |
 | 2 | **TF-IDF + Cosine Similarity** | Tìm phim có review tương đồng với truy vấn |
-| 3 | **SVD (Collaborative Filtering)** | Cá nhân hóa theo lịch sử người dùng |
+| 3 | **Cá nhân hóa nâng cao** | SVD Collaborative (cho user cũ) hoặc Personalized Content-Based (cho tài khoản mới qua danh sách yêu thích) |
 | 4 | **MMR Reranking** | Đa dạng hóa kết quả, tránh gợi ý lặp |
 | 5 | **Lọc Spoiler** | Ẩn review tiết lộ nội dung phim |
 
-**Hybrid Weight hiện tại:** {w_cosine:.0%} Cosine + {w_svd_display:.0%} SVD  
+**Hybrid Weight hiện tại:** {w_cosine:.0%} Cosine + {w_svd_display:.0%} SVD/Gu  
 → Điều chỉnh tỉ lệ này trong Sidebar để thay đổi hành vi gợi ý.
     """)
 
 # ══════════════════════════════ TAB SEARCH ══════════════════════════════════
 with tab_search:
-    st.markdown("#### 🔍 Nhập mô tả nội dung phim bạn muốn xem")
+    st.markdown("#### Nhập mô tả nội dung phim bạn muốn xem")
 
-    col_q, col_btn = st.columns([5, 1])
-    with col_q:
-        query = st.text_input(
-            "query", label_visibility="collapsed",
-            placeholder="VD: Phim kinh dị siêu nhiên, ma quái trong ngôi nhà bỏ hoang...",
-        )
-    with col_btn:
-        do_search = st.button("Tìm phim", type="primary", use_container_width=True)
+    with st.form(key="search_form"):
+        col_q, col_btn = st.columns([5, 1])
+        with col_q:
+            query = st.text_input(
+                "query", label_visibility="collapsed",
+                placeholder="VD: Phim kinh dị siêu nhiên, ma quái trong ngôi nhà bỏ hoang...",
+            )
+        with col_btn:
+            do_search = st.form_submit_button("Tìm phim", type="primary", use_container_width=True)
 
     QUICK_SEARCHES = [
         "Kinh dị ma quái", "Tình cảm lãng mạn",
@@ -850,45 +1115,59 @@ with tab_search:
             do_search = True
 
     if do_search and not query:
-        st.warning("⚠️ Vui lòng nhập mô tả phim!")
+        st.warning("Vui lòng nhập mô tả phim!")
 
     elif do_search and query:
-        with st.status("🤖 Đang phân tích...", expanded=True) as status:
-            st.write("🌐 Dịch thuật sang tiếng Anh...")
+        with st.status("Đang phân tích...", expanded=True) as status:
+            st.write("Dịch thuật sang tiếng Anh...")
             try:
                 from deep_translator import GoogleTranslator
                 query_en = GoogleTranslator(source="auto", target="en").translate(query)
             except Exception:
                 query_en = query
             st.write(f'→ **"{query_en}"**')
-            st.write("🔍 Content-Based Filtering...")
-            st.write("🧠 SVD Collaborative Filtering...")
-            st.write("🔀 MMR Reranking...")
+            st.write("Content-Based Filtering...")
+            st.write("Cá nhân hóa...")
+            st.write("MMR Reranking...")
+            
             results, is_pers, q_vec = recommend_by_query(
                 query_en, selected_user, top_n,
                 w_cos=w_cosine, use_mmr=use_mmr,
             )
-            status.update(label="✅ Hoàn tất!", state="complete", expanded=False)
+            
+            # Lưu trữ kết quả tìm kiếm vào session state
+            st.session_state.search_results = results
+            st.session_state.search_query_en = query_en
+            st.session_state.search_q_vec = q_vec
+            st.session_state.search_is_pers = is_pers
+            status.update(label="Hoàn tất!", state="complete", expanded=False)
 
+    # Hiển thị kết quả tìm kiếm từ session state (đảm bảo không bị mất khi bấm Thích phim)
+    if st.session_state.search_results is not None:
         mode_label = (
-            f"👤 Cá nhân hóa: **{selected_user}**"
-            if is_pers else "🎭 **Cold-start** (100% Content-Based)"
+            f"Cá nhân hóa: **{selected_user}**"
+            if st.session_state.search_is_pers else "**Cold-start** (100% Content-Based)"
         )
-        mmr_label = "🔀 MMR bật" if use_mmr else "📋 MMR tắt"
+        mmr_label = "MMR bật" if use_mmr else "MMR tắt"
         st.markdown(
             f'<div class="alert-i">{mode_label} &nbsp;|&nbsp; {mmr_label} &nbsp;|&nbsp; '
-            f'Truy vấn: <em>"{query_en}"</em></div>',
+            f'Truy vấn: <em>"{st.session_state.search_query_en}"</em></div>',
             unsafe_allow_html=True,
         )
 
-        if results.empty:
+        if st.session_state.search_results.empty:
             st.error("Không tìm thấy phim phù hợp. Thử từ khoá khác.")
         else:
-            render_result_list(results, query_vec=q_vec)
+            render_result_list(
+                st.session_state.search_results, 
+                query_vec=st.session_state.search_q_vec, 
+                tmdb_api_key=tmdb_api_key,
+                context="search"
+            )
 
 # ══════════════════════════════ TAB EXPERIENCE ══════════════════════════════
 with tab_exp:
-    st.markdown("#### 🎭 Gợi Ý Dựa Trên Phim Bạn Đã Xem")
+    st.markdown("#### Gợi Ý Dựa Trên Phim Bạn Đã Xem")
     st.markdown("""
     <div class="alert-i">
     Chọn các phim bạn đã xem và thích. Hệ thống sẽ phân tích <strong>điểm chung</strong>
@@ -907,52 +1186,191 @@ with tab_exp:
         )
     with col_cfg:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        do_exp = st.button("🔍 Gợi ý phim tương tự", type="primary", use_container_width=True)
+        do_exp = st.button("Gợi ý phim tương tự", type="primary", use_container_width=True)
 
     if selected_movies:
-        st.markdown("**✅ Phim đã chọn:**")
+        st.markdown("**Phim đã chọn:**")
         tags_html = " ".join(
-            f'<span class="theme-tag">🎬 {m}</span>' for m in selected_movies
+            f'<span class="theme-tag">{m}</span>' for m in selected_movies
         )
         st.markdown(tags_html, unsafe_allow_html=True)
         st.markdown("")
 
     if do_exp and not selected_movies:
-        st.warning("⚠️ Vui lòng chọn ít nhất 1 phim!")
+        st.warning("Vui lòng chọn ít nhất 1 phim!")
 
     elif do_exp and selected_movies:
-        with st.status("🧠 Đang phân tích gu phim của bạn...", expanded=True) as status:
-            st.write(f"📌 Phân tích {len(selected_movies)} phim đã chọn...")
-            st.write("🔍 Tính vector 'gu' trung bình...")
-            st.write("🔀 MMR Reranking...")
+        with st.status("Đang phân tích gu phim của bạn...", expanded=True) as status:
+            st.write(f"Phân tích {len(selected_movies)} phim đã chọn...")
+            st.write("Tính vector 'gu' trung bình...")
+            st.write("MMR Reranking...")
             results_exp, keywords, avg_vec = recommend_by_movies(
                 selected_movies, selected_user, top_n,
                 w_cos=w_cosine, use_mmr=use_mmr,
             )
-            status.update(label="✅ Hoàn tất!", state="complete", expanded=False)
+            status.update(label="Hoàn tất!", state="complete", expanded=False)
 
         if results_exp.empty:
             st.error("Không tìm thấy phim phù hợp.")
         else:
             st.markdown("---")
-            st.markdown("### 🔑 Điểm Chung Giữa Các Phim Đã Chọn")
+            st.markdown("### Điểm Chung Giữa Các Phim Đã Chọn")
             st.caption("Các từ khoá nổi bật trong review – đây là 'gu' phim của bạn:")
             kw_html = " ".join(f'<span class="theme-tag">{k}</span>' for k in keywords)
             st.markdown(kw_html, unsafe_allow_html=True)
 
             is_pers_exp = _is_personalized(selected_user)
             mode_label  = (
-                f"👤 Cá nhân hóa: **{selected_user}**"
-                if is_pers_exp else "🎭 Cold-start (100% Content-Based)"
+                f"Cá nhân hóa: **{selected_user}**"
+                if is_pers_exp else "Cold-start (100% Content-Based)"
             )
-            mmr_label = "🔀 MMR bật" if use_mmr else "📋 MMR tắt"
+            mmr_label = "MMR bật" if use_mmr else "MMR tắt"
             st.markdown(
-                f'<div class="alert-g" style="margin-top:12px;">✅ {mode_label}'
+                f'<div class="alert-g" style="margin-top:12px;">{mode_label}'
                 f' &nbsp;|&nbsp; {mmr_label}'
                 f' &nbsp;|&nbsp; Tìm thấy <strong>{len(results_exp)}</strong> phim phù hợp</div>',
                 unsafe_allow_html=True,
             )
 
-            st.markdown("### 🎯 Phim Gợi Ý Cho Bạn")
-            render_result_list(results_exp, query_vec=avg_vec)
+            st.markdown("### Phim Gợi Ý Cho Bạn")
+            render_result_list(results_exp, query_vec=avg_vec, tmdb_api_key=tmdb_api_key, context="exp")
 
+# ══════════════════════════════ TAB PROFILE ══════════════════════════════════
+with tab_profile:
+    st.markdown("### Hồ Sơ Cá Nhân CineMatch")
+    
+    if not st.session_state.logged_in:
+        st.info("Vui lòng đăng nhập hoặc đăng ký tài khoản ở Sidebar bên trái để truy cập hồ sơ cá nhân và quản lý sở thích.")
+    else:
+        # Tải thông tin tài khoản hiện hành
+        accounts = load_user_accounts()
+        user_info = accounts.get(st.session_state.username, {})
+        created_at = user_info.get("created_at", "N/A")
+        
+        col_info, col_pwd = st.columns([2, 1], gap="large")
+        
+        with col_info:
+            st.markdown(f"#### Xin chào, **{st.session_state.username}**")
+            st.markdown(f"""
+            * **Ngày đăng ký tài khoản:** {created_at}
+            * **Tổng số phim yêu thích:** {len(st.session_state.favorites)} bộ phim
+            """)
+            
+            # --- PHẦN PHÂN TÍCH GU PHIM CỦA BẠN ---
+            st.markdown("---")
+            st.markdown("#### Phân tích gu phim của bạn")
+            
+            if len(st.session_state.favorites) == 0:
+                st.info("Danh sách phim yêu thích của bạn đang trống. Hãy tìm kiếm phim và nhấn nút để thêm phim yêu thích, AI sẽ tự động phân tích gu phim của bạn tại đây!")
+            else:
+                movie_to_idx = {row["movie"]: idx for idx, row in movie_profiles.iterrows()}
+                idxs = [movie_to_idx[m] for m in st.session_state.favorites if m in movie_to_idx]
+                
+                if idxs:
+                    sel_matrix = content_matrix[idxs]
+                    # Trích xuất top 8 từ khóa đại diện cho gu phim
+                    keywords = get_enriched_keywords(sel_matrix, tfidf_vec, n=8)
+                    st.markdown("Dựa trên các bộ phim bạn đã thích, AI phân tích thấy gu phim của bạn nổi bật với các từ khóa và chủ đề sau:")
+                    
+                    kw_html = " ".join(f'<span class="theme-tag">{k}</span>' for k in keywords)
+                    st.markdown(kw_html, unsafe_allow_html=True)
+                    st.caption("Các từ khóa được trích xuất tự động bằng phân tích TF-IDF từ các review tích cực của những bộ phim bạn đã thích.")
+                else:
+                    st.warning("Không tìm thấy dữ liệu đặc trưng cho các phim trong danh sách thích.")
+            
+            # --- QUẢN LÝ DANH SÁCH THÍCH TẬP TRUNG ---
+            st.markdown("---")
+            st.markdown("#### Danh sách phim yêu thích")
+            
+            # Tiện ích thêm phim trực tiếp từ Hồ sơ
+            st.markdown("**Thêm nhanh phim yêu thích mới:**")
+            all_movie_names_profile = sorted(movie_profiles["movie"].tolist())
+            unliked_movies = [m for m in all_movie_names_profile if m not in st.session_state.favorites]
+            
+            with st.form("add_favorite_form", clear_on_submit=True):
+                col_add_sel, col_add_btn = st.columns([4, 1])
+                with col_add_sel:
+                    new_fav_movie = st.selectbox(
+                        "Chọn phim để thêm:",
+                        options=[" "] + unliked_movies,
+                        label_visibility="collapsed",
+                        key="select_new_fav_profile"
+                    )
+                with col_add_btn:
+                    submit_add = st.form_submit_button("Thêm", use_container_width=True)
+                
+                if submit_add and new_fav_movie != " ":
+                    st.session_state.favorites.append(new_fav_movie)
+                    accounts[st.session_state.username]["favorites"] = st.session_state.favorites
+                    save_user_accounts(accounts)
+                    st.toast(f"Đã thêm '{new_fav_movie}' vào yêu thích!")
+                    st.rerun()
+            
+            st.markdown("---")
+            if not st.session_state.favorites:
+                st.write("Chưa có phim nào trong danh sách yêu thích của bạn.")
+            else:
+                for m_fav in st.session_state.favorites:
+                    c_fav_name, c_fav_btn = st.columns([5, 1])
+                    with c_fav_name:
+                        st.markdown(f"🎥 **{m_fav}**")
+                    with c_fav_btn:
+                        if st.button("Xóa", key=f"del_fav_tab_{m_fav}", use_container_width=True):
+                            st.session_state.favorites.remove(m_fav)
+                            accounts[st.session_state.username]["favorites"] = st.session_state.favorites
+                            save_user_accounts(accounts)
+                            st.toast(f"Đã xoá '{m_fav}'!")
+                            st.rerun()
+
+            # --- QUẢN LÝ ĐÁNH GIÁ & NHẬN XÉT ---
+            st.markdown("---")
+            st.markdown("#### Phim bạn đã đánh giá & nhận xét")
+            
+            rated_movies = list(st.session_state.ratings.keys())
+            if not rated_movies:
+                st.write("Bạn chưa đánh giá bộ phim nào.")
+            else:
+                for m_rated in rated_movies:
+                    c_rated_info, c_rated_btn = st.columns([5, 1])
+                    with c_rated_info:
+                        m_r = st.session_state.ratings[m_rated]
+                        m_rev = st.session_state.reviews.get(m_rated, "")
+                        stars = rating_to_stars(m_r)
+                        st.markdown(f"**{m_rated}** – {stars} ({m_r}/10)")
+                        if m_rev:
+                            st.caption(f"*Nhận xét:* {m_rev}")
+                    with c_rated_btn:
+                        if st.button("Xóa", key=f"del_rate_tab_{m_rated}", use_container_width=True):
+                            if m_rated in st.session_state.ratings:
+                                del st.session_state.ratings[m_rated]
+                            if m_rated in st.session_state.reviews:
+                                del st.session_state.reviews[m_rated]
+                            if m_rated in st.session_state.favorites:
+                                st.session_state.favorites.remove(m_rated)
+                            
+                            accounts[st.session_state.username]["ratings"] = st.session_state.ratings
+                            accounts[st.session_state.username]["reviews"] = st.session_state.reviews
+                            accounts[st.session_state.username]["favorites"] = st.session_state.favorites
+                            save_user_accounts(accounts)
+                            st.toast(f"Đã xoá đánh giá của phim '{m_rated}'!")
+                            st.rerun()
+        
+        with col_pwd:
+            st.markdown("#### Đổi mật khẩu")
+            with st.form("change_password_form", clear_on_submit=True):
+                old_pwd = st.text_input("Mật khẩu cũ", type="password", key="change_old_pwd")
+                new_pwd = st.text_input("Mật khẩu mới", type="password", key="change_new_pwd")
+                new_pwd_conf = st.text_input("Xác nhận mật khẩu mới", type="password", key="change_new_pwd_conf")
+                submit_change_pwd = st.form_submit_button("Cập nhật mật khẩu", type="primary", use_container_width=True)
+                
+                if submit_change_pwd:
+                    if not old_pwd or not new_pwd or not new_pwd_conf:
+                        st.error("Vui lòng điền đủ thông tin!")
+                    elif new_pwd != new_pwd_conf:
+                        st.error("Mật khẩu xác nhận không khớp!")
+                    elif accounts[st.session_state.username]["password"] != hash_password(old_pwd):
+                        st.error("Mật khẩu cũ không đúng!")
+                    else:
+                        accounts[st.session_state.username]["password"] = hash_password(new_pwd)
+                        save_user_accounts(accounts)
+                        st.success("Đổi mật khẩu thành công!")
